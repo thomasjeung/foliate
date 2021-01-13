@@ -550,7 +550,7 @@
           <object class="GtkModelButton">
             <property name="visible">True</property>
             <property name="action_name">view.enable-footnote</property>
-            <property name="text" translatable="yes">Footnote Preview</property>
+            <property name="text" translatable="yes">Reference Preview</property>
           </object>
         </child>
         <child>
@@ -576,7 +576,7 @@
           <object class="GtkModelButton">
             <property name="visible">True</property>
             <property name="action_name">view.allow-unsafe</property>
-            <property name="tooltip_text" translatable="yes">Allow JavaScript and external resources</property>
+            <property name="tooltip_text" translatable="yes">Allow JavaScript</property>
             <property name="text" translatable="yes">Allow Unsafe Content</property>
           </object>
         </child>
@@ -649,6 +649,13 @@
             <property name="visible">True</property>
             <property name="action-name">win.export-annotations</property>
             <property name="text" translatable="yes">Export Annotations…</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkModelButton">
+            <property name="visible">True</property>
+            <property name="action-name">win.import-annotations</property>
+            <property name="text" translatable="yes">Import Annotations…</property>
           </object>
         </child>
       </object>

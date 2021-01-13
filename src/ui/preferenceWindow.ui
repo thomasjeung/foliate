@@ -168,10 +168,16 @@
                     </child>
                   </object>
                 </child>
+
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="visible">True</property>
+                  </object>
+                </child>
+
                 <child>
                   <object class="GtkLabel">
                     <property name="visible">True</property>
-                    <property name="margin-top">12</property>
                     <property name="xalign">0</property>
                     <property name="label" translatable="yes">Reading</property>
                     <attributes>
@@ -405,10 +411,16 @@
                     </child>
                   </object>
                 </child>
+
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="visible">True</property>
+                  </object>
+                </child>
+
                 <child>
                   <object class="GtkLabel">
                     <property name="visible">True</property>
-                    <property name="margin-top">12</property>
                     <property name="xalign">0</property>
                     <property name="label" translatable="yes">Interface</property>
                     <attributes>
@@ -425,18 +437,27 @@
                         <property name="visible">True</property>
                         <property name="xalign">0</property>
                         <property name="wrap">True</property>
-                        <property name="use-markup">True</property>
-                        <property name="label" translatable="yes">Use traditional titlebar (experimental)
-(requires restart)</property>
+                        <property name="label" translatable="yes">Auto-hide header bar</property>
                       </object>
                     </child>
                     <child>
-                      <object class="GtkSwitch" id="useMenubar">
+                      <object class="GtkSwitch" id="autohideHeaderbar">
                         <property name="visible">True</property>
                         <property name="valign">center</property>
                       </object>
                       <packing>
                         <property name="pack_type">end</property>
+                      </packing>
+                    </child>
+                    <child>
+                      <object class="GtkSwitch" id="autohideHeaderbarDisabled">
+                        <property name="visible">False</property>
+                        <property name="sensitive">False</property>
+                        <property name="state">False</property>
+                        <property name="valign">center</property>
+                      </object>
+                      <packing>
+                        <property name="pack-type">end</property>
                       </packing>
                     </child>
                   </object>
@@ -459,13 +480,215 @@
                         <property name="valign">center</property>
                       </object>
                       <packing>
+                        <property name="pack-type">end</property>
+                      </packing>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="visible">True</property>
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkBox">
+                        <property name="visible">True</property>
+                        <property name="spacing">3</property>
+                        <property name="orientation">vertical</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Use traditional titlebar (experimental)</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Requires restart</property>
+                            <style><class name="dim-label"/></style>
+                            <attributes>
+                              <attribute name="scale" value="0.85"/>
+                            </attributes>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSwitch" id="useMenubar">
+                        <property name="visible">True</property>
+                        <property name="valign">center</property>
+                      </object>
+                      <packing>
+                        <property name="pack_type">end</property>
+                      </packing>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="visible">True</property>
+                  </object>
+                </child>
+
+
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="xalign">0</property>
+                    <property name="label" translatable="yes">OPDS</property>
+                    <attributes>
+                      <attribute name="weight" value="bold"/>
+                    </attributes>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="xalign">0</property>
+                    <property name="label" translatable="yes">When downloading books</property>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="visible">True</property>
+                    <property name="spacing">3</property>
+                    <property name="orientation">vertical</property>
+                    <child>
+                      <object class="GtkRadioButton" id="opds_auto">
+                        <property name="visible">True</property>
+                        <property name="label" translatable="yes">Save to default directory</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkLabel" id="opdsAutoDir">
+                        <property name="visible">True</property>
+                        <property name="selectable">True</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">True</property>
+                        <property name="margin-start">24</property>
+                        <property name="margin-bottom">6</property>
+                        <style><class name="dim-label"/></style>
+                        <attributes>
+                          <attribute name="scale" value="0.85"/>
+                        </attributes>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkRadioButton" id="opds_ask">
+                        <property name="visible">True</property>
+                        <property name="label" translatable="yes">Ask what to do</property>
+                        <property name="group">opds_auto</property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkSeparator">
+                    <property name="visible">True</property>
+                  </object>
+                </child>
+
+                <child>
+                  <object class="GtkLabel">
+                    <property name="visible">True</property>
+                    <property name="xalign">0</property>
+                    <property name="label" translatable="yes">Advanced</property>
+                    <attributes>
+                      <attribute name="weight" value="bold"/>
+                    </attributes>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="visible">True</property>
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkBox">
+                        <property name="visible">True</property>
+                        <property name="spacing">3</property>
+                        <property name="orientation">vertical</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Use Tracker to track file locations</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Requires restart</property>
+                            <style><class name="dim-label"/></style>
+                            <attributes>
+                              <attribute name="scale" value="0.85"/>
+                            </attributes>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSwitch" id="useTracker">
+                        <property name="visible">True</property>
+                        <property name="valign">center</property>
+                      </object>
+                      <packing>
                         <property name="pack_type">end</property>
                       </packing>
                     </child>
                   </object>
                 </child>
                 <child>
-                  <object class="GtkBox" id="autohideHeaderbarBox">
+                  <object class="GtkBox">
+                    <property name="visible">True</property>
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkBox">
+                        <property name="visible">True</property>
+                        <property name="spacing">3</property>
+                        <property name="orientation">vertical</property>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Save file locations</property>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkLabel">
+                            <property name="visible">True</property>
+                            <property name="xalign">0</property>
+                            <property name="wrap">True</property>
+                            <property name="label" translatable="yes">Requires restart</property>
+                            <style><class name="dim-label"/></style>
+                            <attributes>
+                              <attribute name="scale" value="0.85"/>
+                            </attributes>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSwitch" id="storeUris">
+                        <property name="visible">True</property>
+                        <property name="valign">center</property>
+                      </object>
+                      <packing>
+                        <property name="pack_type">end</property>
+                      </packing>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
                     <property name="visible">True</property>
                     <property name="spacing">6</property>
                     <child>
@@ -473,11 +696,36 @@
                         <property name="visible">True</property>
                         <property name="xalign">0</property>
                         <property name="wrap">True</property>
-                        <property name="label" translatable="yes">Auto-hide header bar</property>
+                        <property name="use-markup">True</property>
+                        <property name="label" translatable="yes">Cache locations</property>
                       </object>
                     </child>
                     <child>
-                      <object class="GtkSwitch" id="autohideHeaderbar">
+                      <object class="GtkSwitch" id="cacheLocations">
+                        <property name="visible">True</property>
+                        <property name="valign">center</property>
+                      </object>
+                      <packing>
+                        <property name="pack_type">end</property>
+                      </packing>
+                    </child>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkBox">
+                    <property name="visible">True</property>
+                    <property name="spacing">6</property>
+                    <child>
+                      <object class="GtkLabel">
+                        <property name="visible">True</property>
+                        <property name="xalign">0</property>
+                        <property name="wrap">True</property>
+                        <property name="use-markup">True</property>
+                        <property name="label" translatable="yes">Cache book covers</property>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkSwitch" id="cacheCovers">
                         <property name="visible">True</property>
                         <property name="valign">center</property>
                       </object>

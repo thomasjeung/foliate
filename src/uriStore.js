@@ -15,7 +15,10 @@
 
 const { GLib, Gio } = imports.gi
 const ByteArray = imports.byteArray
-const { Storage, Obj, debug } = imports.utils
+const { readJSON, Storage, Obj, debug } = imports.utils
+
+const settings = new Gio.Settings({ schema_id: pkg.name })
+const storeUris = settings.get_boolean('store-uris')
 
 class UriStore {
     constructor() {
@@ -28,16 +31,18 @@ class UriStore {
         return this._map.get(id)
     }
     set(id, uri) {
+        debug('saving file uri')
         this._map.set(id, uri)
         this._storage.set('uris', Array.from(this._map.entries()))
     }
     delete(id) {
+        debug('deleting file uri')
         this._map.delete(id)
         this._storage.set('uris', Array.from(this._map.entries()))
     }
 }
 
-var uriStore = new UriStore()
+var uriStore = storeUris ? new UriStore() : null
 
 const listDir = function* (path) {
     const dir = Gio.File.new_for_path(path)
@@ -88,13 +93,12 @@ class BookList {
     }
     _loadItem(item) {
         const { identifier, file, modified } = item
-        const [/*success*/, data, /*tag*/] = file.load_contents(null)
-        const json = JSON.parse(data instanceof Uint8Array
-            ? ByteArray.toString(data) : data.toString())
+        const json = readJSON(file)
         if (!json.metadata) return
         const result = {
             identifier,
             metadata: json.metadata,
+            hasAnnotations: json.annotations && json.annotations.length > 0,
             progress: json.progress,
             modified
         }
@@ -193,16 +197,21 @@ class Library {
         const books = this._list.getArray()
 
         const results = []
+        const matchString = (x, q) => typeof x === 'string'
+            ? x.toLowerCase().includes(q) : false
         for (const item of books) {
             if (!item) continue
             const data = this._searchList.getItem(item)
             if (!data) continue
 
             const match = fields.some(field => {
-                if (field === 'subjects') return (data.metadata.subjects || [])
-                    .map(x => x.toLowerCase())
-                    .some(subject => subject.includes(q))
-                else return (data.metadata[field] || '').toLowerCase().includes(q)
+                if (field === 'subjects') {
+                    const subjects = data.metadata.subjects
+                    if (subjects) return subjects.some(subject =>
+                        matchString(subject, q)
+                        || matchString(subject.label, q)
+                        || matchString(subject.term, q))
+                } else return matchString(data.metadata[field], q)
             })
 
             if (match) results.push(item)

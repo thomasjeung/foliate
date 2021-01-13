@@ -1,35 +1,16 @@
-<!DOCTYPE html>
-<!--
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
--->
-<meta charset="utf-8">
-<script src="utils.js"></script>
-<script>
 let baseURI
 
 // very simple OPDS parser
 // the basic idea is derived from https://github.com/SamyPesse/xml-schema
 
-const OPDS_NS = 'http://opds-spec.org/2010/catalog'
-const THR_NS = 'http://purl.org/syndication/thread/1.0'
-const DC_ELS_NS = 'http://purl.org/dc/elements/1.1/'
-const DC_TERMS_NS = 'http://purl.org/dc/terms/'
-const DC_NS = [DC_TERMS_NS, DC_ELS_NS]
-
-const trim = x => x ? x.trim() : x
+const getContent = el => {
+    const type = el.getAttribute('type')
+    if (['html', 'xhtml', 'text/html', 'application/xhtml+xml'].includes(type)) {
+        const str = el.innerHTML
+        if (str.includes('<')) return toPangoMarkup(str)
+        else return toPangoMarkup(unescapeHTML(str))
+    } else return trim(el.textContent)
+}
 
 const link = {
     tag: 'link',
@@ -39,9 +20,25 @@ const link = {
         rel: {},
         type: {},
         title: {},
-        count: { tag: 'count', ns: THR_NS },
-        facetGroup: { tag: 'facetGroup', ns: OPDS_NS },
-        activeFacet: { tag: 'activeFacet', ns: OPDS_NS, transform: x => x === 'true' }
+        count: { ns: THR_NS },
+        facetGroup: { ns: OPDS_NS },
+        activeFacet: { ns: OPDS_NS, transform: x => x === 'true' }
+    },
+    fields: {
+        price: {
+            ns: OPDS_NS,
+            content: 'value',
+            attrs: {
+                currencycode: {}
+            }
+        },
+        indirectAcquisition: {
+            ns: OPDS_NS,
+            recursive: true,
+            attrs: {
+                type: {}
+            }
+        }
     }
 }
 const author = {
@@ -54,10 +51,10 @@ const entry = {
     array: true,
     fields: {
         id: {},
-        title: { transform: trim },
+        title: {},
         published: {},
         updated: {},
-        summary: { transform: trim },
+        summary: {},
         links: link,
         authors: author,
         categories: {
@@ -65,20 +62,33 @@ const entry = {
             array: true,
             attrs: { term: {}, label: {}, scheme: {} }
         },
-        identifier: { ns: DC_NS },
+        identifiers: {
+            tag: 'identifier',
+            array: true,
+            ns: DC_NS
+        },
         publisher: { ns: DC_NS },
         language: { ns: DC_NS },
         issued: { ns: DC_TERMS_NS },
         extent: { ns: DC_TERMS_NS },
+        sources: {
+            tag: 'source',
+            array: true,
+            ns: DC_NS
+        },
         rights: {},
-        content: { transform: trim },
+        content: {
+            manual: true,
+            transform: getContent
+        },
     }
 }
 const feed = {
     tag: 'feed',
     fields: {
         id: {},
-        title: { transform: trim },
+        title: {},
+        subtitle: {},
         icon: {},
         updated: {},
         links: link,
@@ -92,18 +102,29 @@ const parse = (el, schema) => {
     const fields = schema.fields || {}
     const attrList = Object.keys(attrs)
     const fieldList = Object.keys(fields)
+    if (schema.manual) return schema.transform(el)
     if (!attrList.length && !fieldList.length) {
-        const transform = schema.transform || (x => x)
+        const transform = schema.transform || trim
         return transform(el.textContent)
     }
     const output = {}
+    if (schema.content) {
+        const transform = schema.transform || trim
+        output[schema.content] = transform(el.textContent)
+    }
     attrList.forEach(key => {
         const attr = attrs[key]
         const attrName = attr.name || key
-        const value = (attr.ns
-            ? el.getAttributeNS(attr.ns, attrName)
-            : el.getAttribute(attrName)) || attr.default
-        const transform = attr.transform || (x => x)
+        let value
+        if (!attr.ns) {
+            value = el.getAttribute(attrName)
+        } else if (Array.isArray(attr.ns)) {
+            value = attr.ns.map(ns => el.getAttributeNS(ns, attrName))
+                .find(x => x)
+        } else {
+            value = el.getAttributeNS(attr.ns, attrName)
+        }
+        const transform = attr.transform || trim
         output[key] = transform(value)
     })
     fieldList.forEach(key => {
@@ -125,8 +146,10 @@ const parse = (el, schema) => {
                 && child.namespaceURI === field.ns)
 
         if (!tags.length) return
-        const values = tags.map(tag => parse(tag, field))
-        output[key] = field.array || values.length > 1 ? values : values[0]
+        const values = field.recursive
+            ? tags.map(tag => parse(tag, Object.assign({ fields: { [key]: field } }, field)))
+            : tags.map(tag => parse(tag, field))
+        output[key] = field.array ? values : values[0] || undefined
     })
     return output
 }
@@ -155,10 +178,23 @@ const getImage = async (src, token) => {
     }
 }
 
+const fetchWithAuth = (resource, init) => {
+    if (typeof resource !== 'string') return fetch(resource, init)
+    const url = new URL(resource)
+    const { username, password } = url
+    if (!username) return fetch(resource, init)
+    dispatch({ type: 'auth', payload: { username, password } })
+    url.username = ''
+    url.password = ''
+    const req = new Request(url.toString(), init)
+    return fetch(req)
+}
+
+let myfeed
 const getFeed = (uri, token) => {
     baseURI = uri
     const parser = new DOMParser()
-    fetch(uri)
+    fetchWithAuth(uri)
         .then(res => res.text())
         .then(text => parser.parseFromString(text, 'text/xml'))
         .then(doc => {
@@ -169,6 +205,7 @@ const getFeed = (uri, token) => {
                 dispatch({ type: 'entry', payload, token })
             } else if (tagName === 'feed') {
                 const payload = parse(doc.documentElement, feed)
+                myfeed = payload
                 payload.isEntry = false
                 dispatch({ type: 'feed', payload, token })
             } else
@@ -207,4 +244,3 @@ const getOpenSearch = (query, uri, token) => {
 }
 
 dispatch({ type: 'ready' })
-</script>

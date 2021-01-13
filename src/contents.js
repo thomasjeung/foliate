@@ -19,24 +19,25 @@ let Gspell; try { Gspell = imports.gi.Gspell } catch (e) {}
 
 const { alphaColor, isExternalURL } = imports.utils
 const { EpubViewAnnotation } = imports.epubView
+const { sepHeaderFunc } = imports.utils
 
 const highlightColors = ['yellow', 'orange', 'red', 'magenta', 'aqua', 'lime']
 
 const settings = new Gio.Settings({ schema_id: pkg.name })
 
-const AnnotationRow = GObject.registerClass({
+var AnnotationRow = GObject.registerClass({
     GTypeName: 'FoliateAnnotationRow',
     Template: 'resource:///com/github/johnfactotum/Foliate/ui/annotationRow.ui',
     InternalChildren: [
         'annotationSection', 'annotationText', 'annotationNote', 'removeButton'
     ]
 }, class AnnotationRow extends Gtk.ListBoxRow {
-    _init(annotation, epubView) {
+    _init(annotation, epubView, removable = true) {
         super._init()
         this.annotation = annotation
         this._epub = epubView
 
-        this._annotationText.label = annotation.text
+        this._annotationText.label = annotation.text.replace(/\n/g, ' ')
         epubView.getSectionFromCfi(annotation.cfi).then(section =>
             this._annotationSection.label = section.label)
 
@@ -46,7 +47,8 @@ const AnnotationRow = GObject.registerClass({
         this._applyNote()
         annotation.connect('notify::note', this._applyNote.bind(this))
 
-        this._removeButton.connect('clicked', () => this._remove())
+        if (removable) this._removeButton.connect('clicked', () => this._remove())
+        else this._removeButton.hide()
     }
     _applyNote() {
         const note = this.annotation.note
@@ -98,7 +100,8 @@ var ContentsStack = GObject.registerClass({
     InternalChildren: [
         'tocTreeView',
         'annotationsStack', 'annotationsListBox',
-        'bookmarksStack', 'bookmarksListBox', 'bookmarkButton'
+        'bookmarksStack', 'bookmarksListBox', 'bookmarkButton',
+        'annotationsSearchEntry'
     ],
     Signals: {
         'row-activated': { flags: GObject.SignalFlags.RUN_FIRST }
@@ -107,16 +110,13 @@ var ContentsStack = GObject.registerClass({
     _init(params) {
         super._init(params)
 
-        this._annotationsListBox.set_header_func((row) => {
-            if (row.get_index()) row.set_header(new Gtk.Separator())
-        })
-        this._bookmarksListBox.set_header_func((row) => {
-            if (row.get_index()) row.set_header(new Gtk.Separator())
-        })
+        this._annotationsListBox.set_header_func(sepHeaderFunc)
+        this._bookmarksListBox.set_header_func(sepHeaderFunc)
 
         this._tocTreeView.connect('row-activated', () => this._onTocRowActivated())
         this._annotationsListBox.connect('row-activated', this._onAnnotationRowActivated.bind(this))
         this._bookmarksListBox.connect('row-activated', this._onBookmarkRowActivated.bind(this))
+        this._annotationsSearchEntry.connect('search-changed', () => this._updateAnnotations())
     }
     set epub(epub) {
         this._epub = epub
@@ -174,6 +174,25 @@ var ContentsStack = GObject.registerClass({
         this._epub.goTo(row.bookmark.cfi)
         this.emit('row-activated')
     }
+    _updateAnnotations() {
+        let model = this._annotations
+        if (!model) return
+        const query = this._annotationsSearchEntry.text
+        if (query) {
+            const results = new Gio.ListStore()
+            const n = model.get_n_items()
+            for (let i = 0; i < n; i++) {
+                const annotation = model.get_item(i)
+                const { text, color, note } = annotation
+                if ([text, color, note]
+                    .some(x => x.toLowerCase().includes(query)))
+                    results.append(annotation)
+            }
+            model = results
+        }
+        this._annotationsListBox.bind_model(model, annotation =>
+            new AnnotationRow(annotation, this._epub))
+    }
     _updateData(annotations, bookmarks) {
         if (annotations) {
             this._annotationsStack.visible_child_name =
@@ -181,9 +200,10 @@ var ContentsStack = GObject.registerClass({
             annotations.connect('items-changed', () => {
                 this._annotationsStack.visible_child_name =
                     annotations.get_n_items() ? 'main' : 'empty'
+                this._updateAnnotations()
             })
-            this._annotationsListBox.bind_model(annotations, annotation =>
-                new AnnotationRow(annotation, this._epub))
+            this._annotations = annotations
+            this._updateAnnotations()
         }
         if (bookmarks) {
             this._bookmarksStack.visible_child_name =
@@ -228,6 +248,9 @@ var FindBox = GObject.registerClass({
         this._inBook.connect('toggled', () => this._onFindEntryActivate())
         this._inSection.connect('toggled', () => this._onFindEntryActivate())
         this._findTreeView.connect('row-activated', () => this._onFindRowActivated())
+    }
+    set height_request(h) {
+        this._findScrolledWindow.height_request = h
     }
     set epub(epub) {
         this._epub = epub
@@ -276,21 +299,45 @@ var FindBox = GObject.registerClass({
     }
 })
 
+const refLabels = {
+    'biblioref': _('Bibliography'),
+    'glossref': _('Glossary'),
+    'noteref': null,
+    'annoref': _('Annotation'), // deprecated
+}
+const noteLabels = {
+    'footnote': _('Footnote'),
+    'endnote': _('Endnote'),
+    'rearnote': _('Endnote'), // deprecated
+    'note': _('Note'), // deprecated
+    'annotation': _('Annotation'), // deprecated
+}
+
 var FootnotePopover = GObject.registerClass({
     GTypeName: 'FoliateFootnotePopover',
     Template: 'resource:///com/github/johnfactotum/Foliate/ui/footnotePopover.ui',
     InternalChildren: [
-        'footnoteLabel', 'controls', 'button'
+        'footnoteLabel', 'label', 'button', 'label'
     ]
 }, class FootnotePopover extends Gtk.Popover {
-    _init(footnote, link, epubView) {
+    _init({ footnote, link, refTypes, noteTypes }, epubView) {
         super._init()
         this._link = link
         this._epub = epubView
         this._footnoteLabel.label = footnote
         this._footnoteLabel.connect('activate-link', this._activateLink.bind(this))
         this._button.connect('clicked', () => this._goToLinkedLocation())
-        if (!link) this._controls.hide()
+        if (!link) this._button.hide()
+
+        const refLabelKey = Object.keys(refLabels).find(x => refTypes.includes(x))
+        const refLabel = refLabels[refLabelKey]
+        if (refLabel) this._label.label = refLabel
+        else {
+            const noteLabelKey = Object.keys(noteLabels).find(x => noteTypes.includes(x))
+            const noteLabel = noteLabels[noteLabelKey]
+            if (noteLabel) this._label.label = noteLabel
+            else if (refLabelKey === 'noteRef') this._label.label = _('Note')
+        }
     }
     popup() {
         super.popup()

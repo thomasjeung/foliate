@@ -14,35 +14,35 @@
  */
 
 const { GObject, GLib, Gio, Gtk, Gdk, Pango, GdkPixbuf, WebKit2 } = imports.gi
-let Soup; try { Soup = imports.gi.Soup } catch (e) {}
-const { invertRotate, scalePixbuf } = imports.utils
+const { invertRotate, scalePixbuf, downloadWithWebKit, getFileInfoAsync }
+    = imports.utils
 const { uriStore, library } = imports.uriStore
 const { EpubCFI } = imports.epubcfi
 
 const {
     debug, error, markupEscape, regexEscape,
     Storage, disconnectAllHandlers, base64ToPixbuf,
-    mimetypes, execCommand, recursivelyDeleteDir
+    mimetypes, mimetypeIs, execCommand, recursivelyDeleteDir,
+    debounce
 } = imports.utils
-
-// formats where we let the user add annotations without warning
-var enableAnnotations = [
-    mimetypes.directory,
-    mimetypes.json,
-    mimetypes.xml,
-    mimetypes.epub,
-    mimetypes.mobi,
-    mimetypes.kindle,
-    mimetypes.kindleAlias,
-]
 
 const python = GLib.find_program_in_path('python') || GLib.find_program_in_path('python3')
 const kindleUnpack = pkg.pkgdatadir + '/assets/KindleUnpack/kindleunpack.py'
 
 const settings = new Gio.Settings({ schema_id: pkg.name + '.view' })
+const generalSettings = new Gio.Settings({ schema_id: pkg.name })
 
-// must be the same as `CHARACTERS_PER_PAGE` in assets/epub-viewer.js
+// must be the same as `CHARACTERS_PER_PAGE` in web/epub-viewer.js
+// in 1.x this was 1600, so this was needed to automatically clear the cache
 const CHARACTERS_PER_PAGE = 1024
+
+// this should be bumped whenever FB2 rendering (see web/webpub.js) is changed
+// that way we can clear the cache
+const FB2_CONVERTER_VERSION = '2.4.0'
+
+// threshold for touchscreen swipe velocity, velocity higher than this is considered as a swipe
+// that will turn pages
+const SWIPE_SENSIVITY = 800
 
 // the `__ibooks_internal_theme` attribute is set on `:root` in Apple Books
 // can be used by books to detect dark theme without JavaScript
@@ -103,10 +103,10 @@ const EpubViewBookmark = GObject.registerClass({
 }, class EpubViewBookmark extends GObject.Object {})
 
 const dataMap = new Map()
-const getData = identifier => {
+const getData = (identifier, type) => {
     if (dataMap.has(identifier)) return dataMap.get(identifier)
     else {
-        const data = new EpubViewData(identifier)
+        const data = new EpubViewData(identifier, type)
         dataMap.set(identifier, data)
         return data
     }
@@ -127,10 +127,11 @@ var EpubViewData = GObject.registerClass({
         'cache-modified': { flags: GObject.SignalFlags.RUN_FIRST }
     }
 }, class EpubViewData extends GObject.Object {
-    _init(identifier) {
+    _init(identifier, type) {
         super._init()
 
         this._identifier = identifier
+        this._type = type
         this._viewSet = new Set()
 
         this._storage = new Storage(EpubViewData.dataPath(identifier))
@@ -148,6 +149,7 @@ var EpubViewData = GObject.registerClass({
             library.update(identifier, {
                 identifier,
                 metadata: this._storage.get('metadata', {}),
+                hasAnnotations: this._annotationsMap.size > 0,
                 progress: this._storage.get('progress', []),
                 modified: new Date()
             })
@@ -206,12 +208,22 @@ var EpubViewData = GObject.registerClass({
         this._storage.set('metadata', metadata)
     }
     get locations() {
+        if (mimetypeIs.fb2(this._type)) {
+            const converterVersion = this._cache.get('converterVersion')
+            if (converterVersion === FB2_CONVERTER_VERSION)
+                return this._cache.get('locations')
+            else return null
+        }
+
         const locationsChars = this._cache.get('locationsChars')
         if (locationsChars === CHARACTERS_PER_PAGE)
             return this._cache.get('locations')
         else return null
     }
     set locations(locations) {
+        if (mimetypeIs.fb2(this._type)) {
+            this._cache.set('converterVersion', FB2_CONVERTER_VERSION)
+        }
         this._cache.set('locationsChars', CHARACTERS_PER_PAGE)
         this._cache.set('locations', locations)
     }
@@ -324,9 +336,11 @@ var EpubViewData = GObject.registerClass({
         return this._storage.data
     }
     saveCover(cover) {
+        if (!generalSettings.get_boolean('cache-covers')) return
         // TODO: maybe don't save cover if one already exists
         debug(`saving cover to ${this._coverPath}`)
-        const pixbuf = scalePixbuf(cover)
+        const width = generalSettings.get_int('cache-covers-size')
+        const pixbuf = scalePixbuf(cover, 1, width, false)
         pixbuf.savev(this._coverPath, 'png', [], [])
     }
     static dataPath(identifier) {
@@ -432,6 +446,9 @@ var EpubView = GObject.registerClass({
         'img-event-type':
             GObject.ParamSpec.string('img-event-type', 'img-event-type', 'img-event-type',
                 GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT, 'click'),
+        ephemeral:
+            GObject.ParamSpec.boolean('ephemeral', 'ephemeral', 'ephemeral',
+                GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT, false),
     },
     Signals: {
         'data-ready': {
@@ -441,6 +458,10 @@ var EpubView = GObject.registerClass({
         'rendition-ready': { flags: GObject.SignalFlags.RUN_FIRST },
         'book-displayed': { flags: GObject.SignalFlags.RUN_FIRST },
         'book-loading': { flags: GObject.SignalFlags.RUN_FIRST },
+        'book-downloading': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+            param_types: [GObject.TYPE_DOUBLE]
+        },
         'book-error': {
             flags: GObject.SignalFlags.RUN_FIRST,
             param_types: [GObject.TYPE_STRING]
@@ -549,16 +570,48 @@ var EpubView = GObject.registerClass({
         this._history = []
 
         this._contextMenu = null
+        const webKitSettings = new WebKit2.Settings({
+            allow_top_navigation_to_data_urls: false,
+            allow_modal_dialogs: false,
+            enable_fullscreen: false,
+            enable_html5_database: false,
+            enable_html5_local_storage: false,
+            enable_hyperlink_auditing: false,
+            enable_offline_web_application_cache: false,
+            enable_java: false,
+            enable_plugins: false,
+            media_playback_requires_user_gesture: true,
+            enable_write_console_messages_to_stdout: true,
+            allow_file_access_from_file_urls: true,
+            enable_javascript_markup: false
+        })
+        webKitSettings.set_user_agent_with_application_details('Foliate', pkg.version)
         this._webView = new WebKit2.WebView({
             visible: true,
-            settings: new WebKit2.Settings({
-                enable_write_console_messages_to_stdout: true,
-                allow_file_access_from_file_urls: true
-            })
+            is_ephemeral: true,
+            settings: webKitSettings
         })
         this._webView.connect('context-menu', () =>
             this._contextMenu ? this._contextMenu() : true)
         this._webView.connect('size-allocate', () => this._updateWindowSize())
+
+        const runResource = resource => new Promise((resolve) =>
+            this._webView.run_javascript_from_gresource(resource, null, () => resolve()))
+
+        const loadScripts = async () => {
+            await runResource('/com/github/johnfactotum/Foliate/web/jszip.min.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/epub.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/crypto-js/core.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/crypto-js/enc-latin1.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/crypto-js/md5.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/utils.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/webpub.js')
+            await runResource('/com/github/johnfactotum/Foliate/web/epub-viewer.js')
+        }
+
+        this._webView.connect('load-changed', (webView, event) => {
+            if (event == WebKit2.LoadEvent.FINISHED) loadScripts()
+        })
 
         const contentManager = this._webView.get_user_content_manager()
         contentManager.connect('script-message-received::action', (_, jsResult) => {
@@ -571,6 +624,79 @@ var EpubView = GObject.registerClass({
         this._connectSettings()
         this._connectData()
         this.connect('book-error', (_, msg) => logError(new Error(msg)))
+
+        this._swipeGesture = new Gtk.GestureSwipe({ widget: this._webView })
+        this._swipeGesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        this._swipeGesture.set_touch_only(true)
+        this._swipeGesture.connect('swipe', async (_, velocityX, velocityY) => {
+            try {
+                // do not switch to another page if the page has been pinch zoomed,
+                // this protects against accidental switches if user pans the page
+                // too fast
+                if (await this.getWindowIsZoomed()) return
+                // switch to another page if swipe was fast enough
+                if (Math.abs(velocityY) < SWIPE_SENSIVITY) {
+                    // allow swipe to left/right with paginated and scrolled
+                    // layouts but not with continuous layout, as changing page
+                    // within continuous layout would just scroll the page by
+                    // the height of the screen and that is not very intuitive
+                    // to use
+                    if (this.isPaginated || this.isScrolled) {
+                        if (velocityX > SWIPE_SENSIVITY) {
+                            this.goLeft()
+                        } else if (velocityX < -SWIPE_SENSIVITY) {
+                            this.goRight()
+                        }
+                    }
+                } else {
+                    // allow swipe up/down with paginated layouts, and disable
+                    // for non-paginated layouts (scrolled, continuous), this
+                    // protects against accidental switches if user pans the
+                    // page too fast
+                    if (this.isPaginated) {
+                        if (velocityY > SWIPE_SENSIVITY) {
+                            this.prev()
+                        } else if (velocityY < -SWIPE_SENSIVITY) {
+                            this.next()
+                        }
+                    }
+                }
+            } catch (e) {
+                logError(e)
+            }
+        })
+
+        const scrollPage = debounce(async (deltaX, deltaY) => {
+            try {
+                // do not switch to another page if the page has been pinch zoomed,
+                // let the page contents scroll instead
+                if (await this.getWindowIsZoomed()) return
+                // switch to another page
+                if (Math.abs(deltaX) > Math.abs(deltaY)) {
+                    if (deltaX > 0) this.goRight()
+                    else if (deltaX < 0) this.goLeft()
+                } else {
+                    if (deltaY > 0) this.next()
+                    else if (deltaY < 0) this.prev()
+                }
+            } catch (e) {
+                logError(e)
+            }
+        }, 100, true)
+
+        this._webView.connect('scroll-event', (_, event) => {
+            if (!this.isPaginated) return
+            // ignore touchscreen scroll events as webkit already handles those
+            // by default to pan the page and page flipping is already
+            // implemented by _swipeGesture above
+            const source = event.get_source_device().get_source()
+            if (source === Gdk.InputSource.TOUCHSCREEN) return
+
+            const [, deltaX, deltaY] = event.get_scroll_deltas()
+            // first mouse wheel scroll event starts with 0,0 delta, ignore them
+            // to avoid debounce from triggering on event that doesn't do anything
+            if (deltaX !== 0 || deltaY !== 0) scrollPage(deltaX, deltaY)
+        })
     }
     _connectSettings() {
         this._zoomLevel = this.settings.zoom_level
@@ -579,6 +705,7 @@ var EpubView = GObject.registerClass({
             this.settings.connect('notify::zoom-level', () => {
                 this._zoomLevel = this.settings.zoom_level
                 this._run(`zoomLevel = ${this.settings.zoom_level}`)
+                this._updateWindowSize()
             }),
             this.settings.connect('notify::font', () => this._applyStyle()),
             this.settings.connect('notify::spacing', () => this._applyStyle()),
@@ -615,23 +742,26 @@ var EpubView = GObject.registerClass({
     }
     _connectData() {
         this.connect('metadata', () => {
+            const cacheLocations = generalSettings.get_boolean('cache-locations')
+
             const type = this.contentType
             this.metadata.format = type
             const { identifier } = this.metadata
             let locations
-            if (identifier) {
-                this._data = getData(identifier)
+            if (identifier && !this.ephemeral) {
+                this._data = getData(identifier, type)
                 this._data.addView(this)
                 this.emit('data-ready', this._data.annotationsList, this._data.bookmarksList)
                 locations = this._data.locations
                 this._data.metadata = this.metadata
-                uriStore.set(identifier, this._file.get_uri())
+                if (uriStore) uriStore.set(identifier, this._file.get_uri())
                 this.actionGroup.lookup_action('clear-cache').enabled = true
                 if (this.cover) this._data.saveCover(this.cover)
             }
-            // since locations are based on characters, don't generate locations
-            // for comic books, which contain no characters
-            const fallback = ['cbz', 'cbr', 'cb7', 'cbt'].includes(this._inputType)
+            const fallback = !cacheLocations
+                // since locations are based on characters, don't generate locations
+                // for comic books, which contain no characters
+                || ['cbz', 'cbr', 'cb7', 'cbt'].includes(this._inputType)
             if (fallback) this.emit('locations-fallback')
             else this._run(`loadLocations(${locations || 'null'})`)
             this._run('render()')
@@ -676,22 +806,30 @@ var EpubView = GObject.registerClass({
         })
         this._webView.connect('destroy', () => {
             if (!this._data) return
-            this._disconnectData()
             this._data.deleteView(this)
+            this._disconnectData()
         })
     }
     _disconnectData() {
         if (!this._data) return
-        if (this._dataHandlers) this._dataHandlers.forEach(h => this._data.disconnect(h))
+        if (this._dataHandlers) {
+            this._dataHandlers.forEach(h => this._data.disconnect(h))
+            this._dataHandlers = null
+        }
         this._data.disconnectAll()
+        this._data = null
     }
     _load() {
         this.emit('book-loading')
         this._ready = false
         let viewer = this.settings.allow_unsafe ? unsafeViewerPath : viewerPath
 
+        const webViewSettings = this._webView.get_settings()
         if (['cbz', 'cbr', 'cb7', 'cbt'].includes(this._inputType)) {
             viewer = cbViewerPath
+            webViewSettings.enable_javascript_markup = true
+        } else {
+            webViewSettings.enable_javascript_markup = this.settings.allow_unsafe
         }
 
         this._webView.load_uri(GLib.filename_to_uri(viewer, null))
@@ -738,12 +876,15 @@ var EpubView = GObject.registerClass({
 
                 const uri = this._uri
                 const filename = this._file.get_basename().replace(/\.[^\s.]+$/, '')
+
+                const options = layouts[this.settings.layout].options
+
                 this._run(`open(
                     decodeURI("${encodeURI(uri)}"),
                     decodeURI("${encodeURI(filename)}"),
                     '${this._inputType}',
                     ${layouts[this.settings.layout].renderTo},
-                    ${JSON.stringify(layouts[this.settings.layout].options)})`)
+                    ${JSON.stringify(options)})`)
                 break
             }
             case 'book-error':
@@ -846,7 +987,7 @@ var EpubView = GObject.registerClass({
             }
             case 'selection': {
                 this.selection = payload
-                this.selection.text = this.selection.text.trim().replace(/\n/g, ' ')
+                this.selection.text = this.selection.text.trim()
                 const position = this.selection.position
 
                 // position needs to be adjusted for zoom level
@@ -914,13 +1055,16 @@ var EpubView = GObject.registerClass({
             linkColor: invert(this.settings.link_color),
             invert: this.settings.invert,
             brightness: this.settings.brightness,
-            ibooksInternalTheme: getIbooksInternalTheme(this.settings.bg_color)
+            ibooksInternalTheme: getIbooksInternalTheme(invert(this.settings.bg_color))
         }
         return this._run(`setStyle(${JSON.stringify(style)})`)
     }
     _updateWindowSize() {
-        if (this._ready)
-            this._run(`windowSize = ${this._webView.get_allocation().width}`)
+        if (this._ready) {
+            const { width, height } = this._webView.get_allocation()
+            this._run(`windowSize = ${width}`)
+            this._run(`windowHeight = ${height}`)
+        }
     }
     set _zoomLevel(zoomLevel) {
         this._webView.zoom_level = zoomLevel
@@ -952,50 +1096,50 @@ var EpubView = GObject.registerClass({
         this.emit('book-loading')
         this.close()
         this._file = file
-        try {
-            this._fileInfo = this._file.query_info('standard::content-type',
-                Gio.FileQueryInfoFlags.NONE, null)
-        } catch (e) {
-            logError(e)
-            this._fileInfo = null
+        this._fileInfo = null
+
+        let uri = this._file.get_uri()
+        let path = this._file.get_path()
+
+        // if path is null, we download the file with libsoup first
+        if (!path) {
+            const dir = GLib.dir_make_tmp(null)
+            this._tmpdir = dir
+            try {
+                path = GLib.build_filenamev([dir, this._file.get_basename()])
+                const file = Gio.File.new_for_path(path)
+                const localUri = file.get_uri()
+                const onProgress = progress =>
+                    this.emit('book-downloading', progress)
+                onProgress(0)
+                this._downloadToken = {}
+                await downloadWithWebKit(
+                    uri, localUri, onProgress, this._downloadToken, this._webView.get_toplevel())
+                uri = localUri
+
+                try {
+                    this._fileInfo = await getFileInfoAsync(file)
+                } catch (e) {
+                    logError(e)
+                }
+            } catch (e) {
+                logError(e)
+                return this.emit('book-error', _('Failed to load remote file.'))
+            }
+        } else {
+            try {
+                this._fileInfo = await getFileInfoAsync(this._file)
+            } catch (e) {
+                logError(e)
+            }
         }
         if (!this._fileInfo) return this.emit('book-error', _('File not found.'))
 
-        const contentType = this._fileInfo.get_content_type()
-        const uri = this._file.get_uri()
-        switch (contentType) {
+        switch (this._fileInfo.get_content_type()) {
             case mimetypes.mobi:
             case mimetypes.kindle:
             case mimetypes.kindleAlias: {
-                let path = this._file.get_path()
-                const dir = GLib.dir_make_tmp(null)
-                this._tmpdir = dir
-                if (!path) {
-                    const msg = _('Failed to load remote file.')
-                    if (!Soup) return this.emit('book-error', msg)
-                    // if path is null, we download the file with libsoup first
-                    // then feed it to KindleUnpack
-                    const session = new Soup.SessionAsync()
-                    const request = Soup.Message.new('GET', uri)
-                    try {
-                        await new Promise((resolve, reject) => {
-                            session.queue_message(request, (session, message) => {
-                                if (message.status_code !== 200) reject()
-                                else {
-                                    path = GLib.build_filenamev([dir, this._file.get_basename()])
-                                    const file = Gio.File.new_for_path(path)
-                                    const outstream = file.replace(
-                                        null, false, Gio.FileCreateFlags.NONE, null)
-                                    outstream.write_bytes(
-                                        message.response_body.flatten().get_as_bytes(), null)
-                                    resolve()
-                                }
-                            })
-                        })
-                    } catch (e) {
-                        return this.emit('book-error', msg)
-                    }
-                }
+                const dir = this._tmpdir || GLib.dir_make_tmp(null)
                 const command = [python, kindleUnpack, '--epub_version=3', path, dir]
                 execCommand(command, null, false, null, true).then(() => {
                     const mobi8 = dir + '/mobi8/'
@@ -1013,6 +1157,8 @@ var EpubView = GObject.registerClass({
             case mimetypes.xml: this.open_(uri, 'opf'); break
             case mimetypes.epub: this.open_(uri, 'epub'); break
             case mimetypes.text: this.open_(uri, 'text'); break
+            case mimetypes.html: this.open_(uri, 'html'); break
+            case mimetypes.xhtml: this.open_(uri, 'xhtml'); break
             case mimetypes.fb2: this.open_(uri, 'fb2'); break
             case mimetypes.fb2zip: this.open_(uri, 'fb2zip'); break
             case mimetypes.cbz: this.open_(uri, 'cbz'); break
@@ -1027,9 +1173,13 @@ var EpubView = GObject.registerClass({
         return null
     }
     close() {
+        this._disconnectData()
         if (this._tmpdir) {
             recursivelyDeleteDir(Gio.File.new_for_path(this._tmpdir))
             this._tmpdir = null
+        }
+        if (this._downloadToken && this._downloadToken.cancel) {
+            this._downloadToken.cancel()
         }
     }
     prev() {
@@ -1056,6 +1206,14 @@ var EpubView = GObject.registerClass({
     async goToPercentage(x) {
         this.goTo(await this._get(`book.locations.cfiFromPercentage(${x})`))
     }
+    goRight() {
+        const rtl = this.metadata.direction === 'rtl'
+        rtl ? this.prev() : this.next()
+    }
+    goLeft() {
+        const rtl = this.metadata.direction === 'rtl'
+        rtl ? this.next() : this.prev()
+    }
     back() {
         if (!this._history.length) return
         this.goTo(this._history.pop(), false)
@@ -1074,7 +1232,7 @@ var EpubView = GObject.registerClass({
         this._run(`rendition.annotations.remove("${cfi}", 'highlight')`)
     }
     addAnnotation(annotation) {
-        this._data.addAnnotation(new EpubViewAnnotation(annotation))
+        this._data.addAnnotation(annotation)
     }
     removeAnnotation(cfi) {
         this._data.removeAnnotation(cfi)
@@ -1106,6 +1264,9 @@ var EpubView = GObject.registerClass({
     getSectionFromCfi(cfi) {
         return this._get(`getSectionFromCfi('${cfi}')`)
     }
+    getWindowIsZoomed() {
+        return this._eval('getWindowIsZoomed()')
+    }
     get sectionMarks() {
         return this._get('sectionMarks')
     }
@@ -1119,7 +1280,85 @@ var EpubView = GObject.registerClass({
     speakNext() {
         this._run(`rendition.next().then(() => speak())`)
     }
+    get isPaginated() {
+        return layouts[this.settings.layout].options.flow === 'paginated'
+    }
+    get isScrolled() {
+        return layouts[this.settings.layout].options.flow === 'scrolled-doc'
+    }
     get widget() {
         return this._webView
     }
 })
+
+var HeadlessEpubViewer = GObject.registerClass({
+    GTypeName: 'FoliateHeadlessEpubViewer',
+    Signals: {
+        'progress': {
+            flags: GObject.SignalFlags.RUN_FIRST,
+            param_types: [GObject.TYPE_INT, GObject.TYPE_INT]
+        },
+    }
+}, class HeadlessEpubViewer extends GObject.Object {
+    _init(params) {
+        super._init(params)
+        this._set = new Set()
+        this._total = 0
+        this._progress = 0
+        this._queue = Promise.resolve()
+        this._failed = []
+    }
+    openFiles(files) {
+        this._total += files.length
+        this.emit('progress', this._progress, this._total)
+        for (const file of files) {
+            const then = () => {
+                this._progress++
+                this.emit('progress', this._progress, this._total)
+                if (this._progress === this._total) this.stop()
+            }
+            const f = () => this.open(file).then(then)
+            this._queue = this._queue.then(f).catch(f)
+        }
+    }
+    stop() {
+        for (const offscreen of this._set) offscreen.destroy()
+        this._set.clear()
+        this._total = 0
+        this._progress = 0
+        this._failed = []
+    }
+    open(file) {
+        return new Promise((resolve, reject) => {
+            let metadataLoaded, coverLoaded
+            const epub = new EpubView()
+            const offscreen = new Gtk.OffscreenWindow()
+            offscreen.add(epub.widget)
+            offscreen.show_all()
+            this._set.add(offscreen)
+            const close = () => {
+                if (!metadataLoaded || !coverLoaded) return
+                this._set.delete(offscreen)
+                offscreen.destroy()
+                resolve()
+            }
+            epub.connect('metadata', () => {
+                metadataLoaded = true
+                close()
+            })
+            epub.connect('cover', () => {
+                coverLoaded = true
+                close()
+            })
+            epub.connect('book-error', () => reject())
+            // NOTE: must not open until we've connected to `book-error`
+            // because opening a book can fail synchronously!
+            epub.open(file)
+        }).catch(() => this._failed.push(file))
+    }
+    get failed() {
+        return this._failed
+    }
+})
+
+var headlessViewer = new HeadlessEpubViewer()

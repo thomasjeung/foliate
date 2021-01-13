@@ -1,32 +1,26 @@
-<!DOCTYPE html>
-<!--
+/*
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
--->
-<meta charset="utf-8">
-<script src="utils.js"></script>
-<script>
 const wiktionary = (word, language = 'en') => {
-    language = language.slice(0, 2).toLowerCase()
     const baseURL = 'https://en.wiktionary.org/'
     fetch(`https://en.wiktionary.org/api/rest_v1/page/definition/${word}`)
         .then(res => res.ok ? res.json() : Promise.reject(new Error()))
         .then(json => {
             const results = language.length === 2
                 ? json[language]
-                : Object.values(json).find(x => x[0].language === language)
+                : Object.values(json).find(x => x[0].language.toLowerCase() === language)
             results.forEach(el => {
                 el.definitions.forEach(x => {
                     x.definition = toPangoMarkup(x.definition, baseURL)
@@ -74,4 +68,3 @@ const googleTranslate = (word, language = 'en') => {
         .catch(() => dispatch({ type: 'lookup-error' }))
 }
 dispatch({ type: 'ready' })
-</script>

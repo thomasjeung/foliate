@@ -20,19 +20,42 @@ pkg.require({
     'Gtk': '3.0'
 })
 
-const { Gio, Gtk, Gdk, GObject, GLib } = imports.gi
+const { Gio, Gtk, Gdk, GLib, WebKit2 } = imports.gi
 const { ttsDialog } = imports.tts
-let Handy; try { Handy = imports.gi.Handy } catch (e) {}
-if (Handy) Handy.init(null)
+let Handy
+try {
+    imports.gi.versions.Handy = '0.0'
+    Handy = imports.gi.Handy
+    Handy.init(null)
+} catch (e) {
+    try {
+        imports.gi.versions.Handy = '1'
+        Handy = imports.gi.Handy
+    } catch (e) {}
+}
 
-const { mimetypes } = imports.utils
+const webContext = WebKit2.WebContext.get_default()
+webContext.set_sandbox_enabled(true)
+
+Gtk.Window.set_default_icon_name(pkg.name)
+
+const { fileFilters } = imports.utils
 const { Window } = imports.window
-const { LibraryWindow, OpdsWindow } = imports.library
+const { LibraryWindow } = imports.library
 const { customThemes, ThemeEditor, makeThemeFromSettings, applyTheme } = imports.theme
+const { setVerbose, setTimeout } = imports.utils
+const { headlessViewer } = imports.epubView
 
 const settings = new Gio.Settings({ schema_id: pkg.name })
 const windowState = new Gio.Settings({ schema_id: pkg.name + '.window-state' })
 const viewSettings = new Gio.Settings({ schema_id: pkg.name + '.view' })
+const librarySettings = new Gio.Settings({ schema_id: pkg.name + '.library' })
+
+const getLibraryWindow = (app = Gio.Application.get_default()) =>
+    app.get_windows().find(window => window instanceof LibraryWindow)
+    || new LibraryWindow({ application: app })
+
+window.getLibraryWindow = getLibraryWindow
 
 const makeActions = app => ({
     'new-theme': () => {
@@ -64,15 +87,37 @@ const makeActions = app => ({
         settings.bind('img-event-type', $('imgEventTypeCombo'), 'active-id', flag)
         settings.bind('tts-command', $('ttsEntry'), 'text', flag)
         settings.bind('turn-page-on-tap', $('turnPageOnTap'), 'state', flag)
+        librarySettings.bind('use-tracker', $('useTracker'), 'state', flag)
+        settings.bind('store-uris', $('storeUris'), 'state', flag)
+        settings.bind('cache-locations', $('cacheLocations'), 'state', flag)
+        settings.bind('cache-covers', $('cacheCovers'), 'state', flag)
 
-        const showAHBox = () => {
-            $('autohideHeaderbarBox').visible =
+        const opdsAction = librarySettings.get_string('opds-action')
+        const $opdsAction = str => $('opds_' + str)
+        $opdsAction(opdsAction).active = true
+        ;['auto', 'ask'].forEach(x => {
+            const button = $opdsAction(x)
+            button.connect('toggled', () => {
+                if (button.active) librarySettings.set_string('opds-action', x)
+            })
+        })
+        $('opdsAutoDir').label = GLib.build_filenamev(
+            [GLib.get_user_data_dir(), pkg.name, 'books'])
+
+        const updateAHBox = () => {
+            const available =
                 !viewSettings.get_boolean('skeuomorphism')
                 && !settings.get_boolean('use-sidebar')
+                && !settings.get_boolean('use-menubar')
+
+            $('autohideHeaderbar').sensitive = available
+            $('autohideHeaderbar').visible = available
+            $('autohideHeaderbarDisabled').visible = !available
         }
-        showAHBox()
-        const h1 = viewSettings.connect('changed::skeuomorphism', showAHBox)
-        const h2 = settings.connect('changed::use-sidebar', showAHBox)
+        updateAHBox()
+        const h1 = viewSettings.connect('changed::skeuomorphism', updateAHBox)
+        const h2 = settings.connect('changed::use-sidebar', updateAHBox)
+        const h3 = settings.connect('changed::use-menubar', updateAHBox)
 
         const dialog = builder.get_object('preferenceDialog')
         dialog.transient_for = app.active_window
@@ -83,35 +128,21 @@ const makeActions = app => ({
         dialog.destroy()
         viewSettings.disconnect(h1)
         settings.disconnect(h2)
+        settings.disconnect(h3)
     },
     'open': () => {
-        const allFiles = new Gtk.FileFilter()
-        allFiles.set_name(_('All Files'))
-        allFiles.add_pattern('*')
-
-        const epubFiles = new Gtk.FileFilter()
-        epubFiles.set_name(_('E-book Files'))
-        epubFiles.add_mime_type(mimetypes.epub)
-        epubFiles.add_mime_type(mimetypes.mobi)
-        epubFiles.add_mime_type(mimetypes.kindle)
-        epubFiles.add_mime_type(mimetypes.fb2)
-        epubFiles.add_mime_type(mimetypes.fb2zip)
-        epubFiles.add_mime_type(mimetypes.cbz)
-        epubFiles.add_mime_type(mimetypes.cbr)
-        epubFiles.add_mime_type(mimetypes.cb7)
-        epubFiles.add_mime_type(mimetypes.cbt)
-
         const dialog = Gtk.FileChooserNative.new(
             _('Open File'),
             app.active_window,
             Gtk.FileChooserAction.OPEN,
             null, null)
-        dialog.add_filter(epubFiles)
-        dialog.add_filter(allFiles)
+        dialog.add_filter(fileFilters.all)
+        dialog.add_filter(fileFilters.ebook)
+        dialog.set_filter(fileFilters.ebook)
 
         if (dialog.run() === Gtk.ResponseType.ACCEPT) {
-            // const activeWindow = app.active_window
-            // if (activeWindow instanceof LibraryWindow) activeWindow.close()
+            const activeWindow = app.active_window
+            if (activeWindow instanceof LibraryWindow) activeWindow.close()
             new Window({ application: app, file: dialog.get_file() }).present()
         }
     },
@@ -122,7 +153,7 @@ const makeActions = app => ({
             ? clipboardText : ''
 
         const window = new Gtk.Dialog({
-            title: _('Open a Catalog'),
+            title: _('Open Catalog'),
             modal: true,
             use_header_bar: true,
             transient_for: app.active_window
@@ -147,18 +178,26 @@ const makeActions = app => ({
         window.show_all()
         const response = window.run()
         if (response === Gtk.ResponseType.OK && entry.text) {
-            const window = new OpdsWindow({ application: app })
+            const window = getLibraryWindow(app)
             let uri = entry.text.trim().replace(/^opds:\/\//, 'http://')
             if (!uri.includes(':')) uri = 'http://' + uri
-            window.loadOpds(uri)
+            window.openCatalog(uri)
             window.present()
         }
         window.close()
     },
     'library': () => {
-        const windows = app.get_windows()
-        ;(windows.find(window => window instanceof LibraryWindow)
-            || new LibraryWindow({ application: app })).present()
+        const existingLibraryWindow =
+            app.get_windows().find(window => window instanceof LibraryWindow)
+        const activeWindow = app.active_window
+
+        if (existingLibraryWindow) {
+            if (activeWindow.modal) activeWindow.close()
+            existingLibraryWindow.present()
+        } else {
+            activeWindow.close()
+            new LibraryWindow({ application: app }).present()
+        }
     },
     'about': () => {
         const aboutDialog = new Gtk.AboutDialog({
@@ -183,34 +222,95 @@ const makeActions = app => ({
 })
 
 function main(argv) {
+    let restore = true
+    let openHint = ''
+
     const application = new Gtk.Application({
         application_id: 'com.github.johnfactotum.Foliate',
         flags: Gio.ApplicationFlags.HANDLES_OPEN
     })
 
+    application.add_main_option('library',
+        0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+        _('Open library window'), null)
+
+    application.add_main_option('add',
+        0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+        _('Add files to the library'), null)
+
+    application.add_main_option('version',
+        'v'.charCodeAt(0), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+        _('Show version'), null)
+
+    application.add_main_option('verbose',
+        0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+        _('Show verbose debugging information'), null)
+
     application.connect('activate', () => {
-        let activeWindow = application.activeWindow
-        if (!activeWindow) {
-            const lastFile = windowState.get_string('last-file')
-            if (settings.get_boolean('restore-last-file') && lastFile)
-                activeWindow = new Window({
-                    application,
-                    file: Gio.File.new_for_path(lastFile)
-                })
-            else activeWindow = new LibraryWindow({ application })
+        const windows = application.get_windows()
+        let window
+        const lastFile = windowState.get_string('last-file')
+        if (restore && !windows.length && settings.get_boolean('restore-last-file') && lastFile)
+            window = new Window({
+                application,
+                file: Gio.File.new_for_path(lastFile)
+            })
+        else {
+            window = getLibraryWindow(application)
         }
-        activeWindow.present()
+        window.present()
     })
 
-    application.connect('open', (_, files) => files.forEach(file => {
-        let window
-        if (file.get_uri_scheme() === 'opds') {
-            window = new OpdsWindow({ application })
-            const uri = file.get_uri().replace(/^opds:\/\//, 'http://')
-            window.loadOpds(uri)
-        } else window = new Window({ application, file })
-        window.present()
-    }))
+    application.connect('handle-local-options', (application, options) => {
+        application.register(null)
+        if (options.contains('version')) {
+            print(pkg.version)
+            return 0
+        }
+        if (options.contains('verbose')) setVerbose(true)
+        if (options.contains('library')) restore = false
+        if (options.contains('add')) {
+            if (application.get_is_remote()) {
+                const files = argv.splice(1)
+                    .filter(x => !x.startsWith('-'))
+                    .map(x => Gio.File.new_for_commandline_arg(x))
+                application.open(files, 'add')
+                return 0
+            } else openHint = 'add'
+        }
+        return -1
+    })
+
+    let held = false
+    application.connect('open', (application, files, hint) => {
+        if (hint === 'add' || openHint === 'add') {
+            if (!held) {
+                application.hold()
+                held = true
+            }
+            headlessViewer.connect('progress', (viewer, progress, total) => {
+                if (openHint) print(Math.round(progress / total * 100) + '%')
+                if (progress === total && held) {
+                    // add a delay because of debouncing when writing metadata
+                    // this doens't feel like the proper way but it's probably
+                    // the easiest fix
+                    setTimeout(() => {
+                        application.release()
+                        held = false
+                    }, 1500)
+                }
+            })
+            headlessViewer.openFiles(files)
+        } else files.forEach(file => {
+            let window
+            if (file.get_uri_scheme() === 'opds') {
+                window = getLibraryWindow(application)
+                const uri = file.get_uri().replace(/^opds:\/\//, 'http://')
+                window.openCatalog(uri)
+            } else window = new Window({ application, file })
+            window.present()
+        })
+    })
 
     application.connect('startup', () => {
         viewSettings.bind('prefer-dark-theme', Gtk.Settings.get_default(),
@@ -231,8 +331,11 @@ function main(argv) {
             ['lib.list-view', ['<ctrl>1']],
             ['lib.grid-view', ['<ctrl>2']],
             ['lib.main-menu', ['F10']],
-            ['lib.search', ['<ctrl>f', 'slash']],
+            ['lib.search', ['<ctrl>f']],
             ['lib.close', ['<ctrl>w']],
+            ['lib.opds-back', ['<alt>Left']],
+            ['opds.reload', ['<ctrl>r']],
+            ['opds.location', ['<ctrl>l']],
 
             ['win.close', ['<ctrl>w']],
             ['win.reload', ['<ctrl>r']],
@@ -278,6 +381,14 @@ function main(argv) {
 
         const cssProvider = new Gtk.CssProvider()
         cssProvider.load_from_data(`
+            /* remove flowboxchild padding so things align better
+               when mixing flowbox and other widgets;
+               why does Adwaita has flowboxchild padding, anyway?
+               there's already row-/column-spacing, plus you can set margin */
+            flowboxchild {
+                padding: 0;
+            }
+
             /* set min-width to 1px,
                so we can have variable width progress bars a la Kindle */
             progress, trough {
@@ -313,12 +424,12 @@ function main(argv) {
             }
             .foliate-book-image-creator {
                 opacity: 0.7;
-                padding: 12px;
+                padding: 6px;
             }
 
             .foliate-emblem {
-                color: white;
-                background: gray;
+                background: @theme_fg_color;
+                color: @theme_bg_color;
                 border-radius: 100%;
                 padding: 6px;
                 opacity: 0.9;
@@ -333,6 +444,25 @@ function main(argv) {
             .foliate-select {
                 color: #fff;
                 background: rgba(0, 0, 0, 0.4);
+            }
+
+            .foliate-title-main {
+                font-size: 1.18em;
+                font-weight: bold;
+            }
+            .foliate-title-subtitle {
+                font-size: 1.13em;
+                font-weight: 300;
+            }
+            .foliate-title-collection {
+                font-size: smaller;
+            }
+            .foliate-authority-label {
+                font-size: smaller;
+                font-weight: bold;
+                border: 1px solid;
+                border-radius: 5px;
+                padding: 0 5px;
             }
         `)
         Gtk.StyleContext.add_provider_for_screen(

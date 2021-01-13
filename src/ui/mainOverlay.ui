@@ -145,7 +145,7 @@
             <child>
               <object class="GtkButton">
                 <property name="visible">True</property>
-                <property name="action-name">app.open</property>
+                <property name="action-name">win.open</property>
                 <property name="halign">center</property>
                 <property name="label" translatable="yes">Open Another File…</property>
               </object>
@@ -166,6 +166,35 @@
           </object>
           <packing>
             <property name="name">loading</property>
+          </packing>
+        </child>
+        <child>
+          <object class="GtkBox">
+            <property name="visible">True</property>
+            <property name="orientation">vertical</property>
+            <property name="halign">center</property>
+            <property name="valign">center</property>
+            <property name="margin">18</property>
+            <property name="spacing">18</property>
+            <child>
+              <object class="GtkLabel">
+                <property name="visible">True</property>
+                <property name="wrap">True</property>
+                <property name="label" translatable="yes">Downloading…</property>
+                <style><class name="dim-label"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkProgressBar" id="downloadProgressBar">
+                <property name="visible">True</property>
+                <property name="valign">center</property>
+                <property name="halign">center</property>
+                <property name="width-request">250</property>
+              </object>
+            </child>
+          </object>
+          <packing>
+            <property name="name">downloading</property>
           </packing>
         </child>
       </object>
